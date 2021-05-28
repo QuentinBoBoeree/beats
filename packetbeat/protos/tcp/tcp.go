@@ -330,6 +330,12 @@ func (tcp *TCP) Process(id *flows.FlowID, tcphdr *layers.TCP, pkt *protos.Packet
 		// stream first in order to update the TCP stream timer
 		return
 	}
+	//判断当前的tcp包是否是request方向的第一个包，如果是第一个包，且经过判断得出当前包非缓存队列的乱序包，
+	//则需要将gap缓存队列中的所有包弹出，并且进行后续的解析
+	// fixme 需要考虑在有序的新包来临的时候进行开启新线程，线程中需要sleep几秒，
+	// 当前线程需要继续执行后续的逻辑，如果sleep结束，则阻塞主线程，将gap队列中的所有包弹出进行后续的逻辑
+	//设置一个block状态（需要加锁），子线程中sleep完了之后，修改状态
+	//状态存储在连接上
 	tcpStartSeq := tcphdr.Seq
 	tcpSeq := tcpStartSeq + uint32(len(pkt.Payload))
 	lastSeq := conn.lastSeq[stream.dir]
