@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 [![Build Status](https://beats-ci.elastic.co/job/Beats/job/beats/job/master/badge/icon)](https://beats-ci.elastic.co/job/Beats/job/beats/job/master/)
 [![GoReportCard](http://goreportcard.com/badge/elastic/beats)](http://goreportcard.com/report/elastic/beats)
 [![Reviewed by Hound](https://img.shields.io/badge/Reviewed_by-Hound-8E64B0.svg)](https://houndci.com)
@@ -121,3 +122,7 @@ It's possible to configure the build on a GitHub PR by labelling the PR with the
 [apm-beats-update]: https://beats-ci.elastic.co/job/Beats/job/apm-beats-update/
 [apm-beats-packaging]: https://beats-ci.elastic.co/job/Beats/job/packaging/
 [apm-beats-tester]: https://beats-ci.elastic.co/job/Beats/job/beats-tester/
+=======
+# beats
+beats upgrade version,resolved reorder and assemble http packet problems
+>>>>>>> 6434be73dec0ae96ded90a893354528e8d93c93c
