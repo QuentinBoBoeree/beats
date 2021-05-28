@@ -1,0 +1,47 @@
+[
+    {
+        "cisco.asa.connection_type": "AnyConnect",
+        "cisco.asa.dap_records": [
+            "dap_1",
+            "dap_2"
+        ],
+        "cisco.asa.message_id": "734001",
+        "event.action": "firewall-rule",
+        "event.category": [
+            "network"
+        ],
+        "event.code": 734001,
+        "event.dataset": "cisco.asa",
+        "event.kind": "event",
+        "event.module": "cisco",
+        "event.original": "%ASA-6-734001: DAP: User firsname.lastname@domain.net, Addr 1.2.3.4, Connection AnyConnect: The following DAP records were selected for this connection: dap_1, dap_2",
+        "event.severity": 6,
+        "event.timezone": "-02:00",
+        "event.type": [
+            "info"
+        ],
+        "fileset.name": "asa",
+        "input.type": "log",
+        "log.level": "informational",
+        "log.offset": 0,
+        "observer.product": "asa",
+        "observer.type": "firewall",
+        "observer.vendor": "Cisco",
+        "related.ip": [
+            "1.2.3.4"
+        ],
+        "service.type": "cisco",
+        "source.address": "1.2.3.4",
+        "source.geo.continent_name": "Oceania",
+        "source.geo.country_iso_code": "AU",
+        "source.geo.country_name": "Australia",
+        "source.geo.location.lat": -33.494,
+        "source.geo.location.lon": 143.2104,
+        "source.ip": "1.2.3.4",
+        "tags": [
+            "cisco-asa",
+            "forwarded"
+        ],
+        "user.email": "firsname.lastname@domain.net"
+    }
+]
