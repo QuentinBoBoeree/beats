@@ -148,6 +148,12 @@ type TCPConnection struct {
 
 	//temporary list for unordered packets
 	alist [2]list.List
+
+	flushGapBuffer bool
+
+	requestPacketIndex uint32
+
+	pkt *protos.Packet
 }
 
 type TCPStream struct {
@@ -261,6 +267,8 @@ func (stream *TCPStream) gapInStream(nbytes int) (drop bool) {
 
 var (
 	constHTTPVersion = []byte("HTTP/")
+	//声明一个全局互斥锁
+	lock sync.Mutex
 )
 
 func (tcp *TCP) judgeHttpDirection(pkt *protos.Packet) (request, response bool) {
@@ -311,6 +319,36 @@ func (tcp *TCP) judgeHttpDirection(pkt *protos.Packet) (request, response bool) 
 //	}
 //}
 
+func (tcp *TCP) judgeCurrentRequestFirstPacket(pkt *protos.Packet) (requestFirstPacket bool) {
+	if pkt == nil || len(pkt.Payload) == 0 {
+		return false
+	}
+	i := bytes.Index(pkt.Payload, []byte("\r\n"))
+	if i == -1 {
+		return false
+	}
+	fline := pkt.Payload[0:i]
+	if bytes.Equal(pkt.Payload[0:5], constHTTPVersion) {
+		//RESPONSE
+		return false
+	} else {
+		// REQUEST
+		afterMethodIdx := bytes.IndexFunc(fline, unicode.IsSpace)
+		afterRequestURIIdx := bytes.LastIndexFunc(fline, unicode.IsSpace)
+
+		// Make sure we have the VERB + URI + HTTP_VERSION
+		if afterMethodIdx == -1 || afterRequestURIIdx == -1 || afterMethodIdx == afterRequestURIIdx {
+			return false
+		}
+
+		versionIdx := afterRequestURIIdx + len(constHTTPVersion) + 1
+		if len(fline) > versionIdx && bytes.Equal(fline[afterRequestURIIdx+1:versionIdx], constHTTPVersion) {
+			return true
+		}
+	}
+	return false
+}
+
 func (tcp *TCP) Process(id *flows.FlowID, tcphdr *layers.TCP, pkt *protos.Packet) {
 	defer logp.Recover("Process tcp exception")
 
@@ -336,6 +374,29 @@ func (tcp *TCP) Process(id *flows.FlowID, tcphdr *layers.TCP, pkt *protos.Packet
 	// 当前线程需要继续执行后续的逻辑，如果sleep结束，则阻塞主线程，将gap队列中的所有包弹出进行后续的逻辑
 	//设置一个block状态（需要加锁），子线程中sleep完了之后，修改状态
 	//状态存储在连接上
+	if !conn.flushGapBuffer {
+		isRequestFirstPacket := tcp.judgeCurrentRequestFirstPacket(pkt)
+		if isRequestFirstPacket && conn.requestPacketIndex == 0 {
+			conn.requestPacketIndex += 1
+			deepCopyPkt := new(protos.Packet)
+			*deepCopyPkt = *pkt
+			conn.pkt = deepCopyPkt
+			//开启新线程
+			go func(conn *TCPConnection) {
+				time.Sleep(time.Second)
+				lock.Lock()
+				conn.flushGapBuffer = true
+				lock.Unlock()
+			}(conn)
+		}
+	} else {
+		conn.requestPacketIndex = 0
+		lock.Lock()
+		conn.flushGapBuffer = false
+		lock.Unlock()
+		//刷新gap缓存队列，将seq小于等于当前连接当前刷新缓存队列的第一个请求包的seq的包执行后续组包逻辑
+		tcp.flushGapBufferQueue(conn, stream)
+	}
 	tcpStartSeq := tcphdr.Seq
 	tcpSeq := tcpStartSeq + uint32(len(pkt.Payload))
 	lastSeq := conn.lastSeq[stream.dir]
@@ -414,24 +475,38 @@ func (tcp *TCP) Process(id *flows.FlowID, tcphdr *layers.TCP, pkt *protos.Packet
 		if len(conn.alist) == 0 {
 			return
 		}
-		for e := conn.alist[0].Front(); e != nil; {
+		for e := conn.alist[stream.dir].Front(); e != nil; {
 			nexte := e.Next()
 			buf := e.Value.(*payload)
 			if buf == nil {
 				continue
 			}
 			stream.addPacket(&buf.pkt, &buf.tcphdr)
-			conn.alist[0].Remove(e)
+			conn.alist[stream.dir].Remove(e)
 			e = nexte
 		}
-		for e := conn.alist[1].Front(); e != nil; {
+		reverseDir := 0
+		if stream.dir == 0 {
+			reverseDir = 1
+		}
+		if conn.alist[reverseDir].Len() == 0 {
+			return
+		}
+		stream, created := tcp.getStream(&conn.alist[reverseDir].Front().Value.(*payload).pkt)
+		if stream.conn == nil {
+			return
+		}
+		if created {
+			logp.Info("fin packet created stream")
+		}
+		for e := conn.alist[reverseDir].Front(); e != nil; {
 			nexte := e.Next()
 			buf := e.Value.(*payload)
 			if buf == nil {
 				continue
 			}
 			stream.addPacket(&buf.pkt, &buf.tcphdr)
-			conn.alist[1].Remove(e)
+			conn.alist[reverseDir].Remove(e)
 			e = nexte
 		}
 		return
@@ -602,48 +677,119 @@ func (tcp *TCP) removalListener(_ common.Key, value common.Value) {
 	}
 }
 
+func (tcp *TCP) flushGapBufferQueue(conn *TCPConnection, stream TCPStream) {
+	if len(conn.alist) == 0 {
+		return
+	}
+	if conn.alist[0].Len() == 0 && conn.alist[1].Len() == 0 {
+		return
+	}
+	//stream, created := tcp.getStream(pkt)
+	//if stream.conn == nil {
+	//	return
+	//}
+	//请求缓存
+	for e := conn.alist[stream.dir].Front(); e != nil; {
+		logp.Info("iterate through list till we hit upon next gap")
+		nexte := e.Next()
+		unOrderedPayload := e.Value.(*payload)
+		if unOrderedPayload.seq <= conn.pkt.Seq {
+			logp.Info("reorder operation")
+			tcphdr1 := &unOrderedPayload.tcphdr
+			pkt1 := &unOrderedPayload.pkt
+			conn.alist[stream.dir].Remove(e)
+			tcpStartSeq := tcphdr1.Seq
+			tcpSeq := tcpStartSeq + uint32(len(pkt1.Payload))
+			conn.lastSeq[stream.dir] = tcpSeq
+			stream.addPacket(pkt1, tcphdr1)
+		}
+		e = nexte
+	}
+	reverseDir := 0
+	if stream.dir == 0 {
+		reverseDir = 1
+	}
+	if conn.alist[reverseDir].Len() == 0 {
+		return
+	}
+	stream, created := tcp.getStream(&conn.alist[reverseDir].Front().Value.(*payload).pkt)
+	if stream.conn == nil {
+		return
+	}
+	if created {
+		logp.Info("create reverse dir stream")
+	}
+	for e := conn.alist[reverseDir].Front(); e != nil; {
+		nexte := e.Next()
+		unOrderedPayload := e.Value.(*payload)
+		if unOrderedPayload.seq <= (conn.pkt.Ack + uint32(len(conn.pkt.Payload))) {
+			logp.Info("reorder operation")
+			tcphdr1 := &unOrderedPayload.tcphdr
+			pkt1 := &unOrderedPayload.pkt
+			conn.alist[reverseDir].Remove(e)
+			tcpStartSeq := tcphdr1.Seq
+			tcpSeq := tcpStartSeq + uint32(len(pkt1.Payload))
+			conn.lastSeq[reverseDir] = tcpSeq
+			stream.addPacket(pkt1, tcphdr1)
+		}
+		e = nexte
+	}
+
+}
+
 func (ec *expiredConnection) notify() {
 	ec.mod.Expired(&ec.conn.tcptuple, ec.conn.data)
 	if len(ec.conn.alist) == 0 {
 		return
 	}
 	payloadElement := ec.conn.alist[0].Front()
-	if payloadElement == nil {
-		payloadElement = ec.conn.alist[1].Front()
-	}
-	if payloadElement == nil {
-		return
-	}
-	buf := payloadElement.Value.(*payload)
-	stream, created := ec.conn.tcp.getStream(&buf.pkt)
-	logp.Info("detected expiredConnection stream has packet buffer")
-	if created {
-		if isDebug {
-			debugf("detected expiredConnection stream created")
+	if payloadElement != nil {
+		buf := payloadElement.Value.(*payload)
+		stream, created := ec.conn.tcp.getStream(&buf.pkt)
+		logp.Info("detected expiredConnection stream has packet buffer")
+		if created {
+			if isDebug {
+				debugf("detected expiredConnection stream created")
+			}
+		}
+		if stream.conn == nil {
+			return
+		}
+		for e := ec.conn.alist[0].Front(); e != nil; {
+			nexte := e.Next()
+			buf := e.Value.(*payload)
+			if buf == nil {
+				continue
+			}
+			stream.addPacket(&buf.pkt, &buf.tcphdr)
+			ec.conn.alist[0].Remove(e)
+			e = nexte
 		}
 	}
-	if stream.conn == nil {
-		return
-	}
-	for e := ec.conn.alist[0].Front(); e != nil; {
-		nexte := e.Next()
-		buf := e.Value.(*payload)
-		if buf == nil {
-			continue
+	payloadElement = ec.conn.alist[1].Front()
+	if payloadElement != nil {
+		buf := payloadElement.Value.(*payload)
+		stream, created := ec.conn.tcp.getStream(&buf.pkt)
+		logp.Info("detected expiredConnection stream has packet buffer")
+		if created {
+			if isDebug {
+				debugf("detected expiredConnection stream created")
+			}
 		}
-		stream.addPacket(&buf.pkt, &buf.tcphdr)
-		ec.conn.alist[0].Remove(e)
-		e = nexte
-	}
-	for e := ec.conn.alist[1].Front(); e != nil; {
-		nexte := e.Next()
-		buf := e.Value.(*payload)
-		if buf == nil {
-			continue
+		if stream.conn == nil {
+			return
 		}
-		stream.addPacket(&buf.pkt, &buf.tcphdr)
-		ec.conn.alist[0].Remove(e)
-		e = nexte
+		for e := ec.conn.alist[1].Front(); e != nil; {
+			nexte := e.Next()
+			buf := e.Value.(*payload)
+			if buf == nil {
+				continue
+			}
+			stream.addPacket(&buf.pkt, &buf.tcphdr)
+			ec.conn.alist[0].Remove(e)
+			e = nexte
+		}
+
 	}
 
 }
