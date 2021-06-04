@@ -67,11 +67,15 @@ type stream struct {
 	parseState   parserState
 	bodyReceived int
 
-	message  *message
+	message *message
+	//响应的第一个包的seq
 	FirstSeq uint32
+	//响应的第一个包的ack
 	FirstAck uint32
-	LastSeq  uint32
-	LastAck  uint32
+	//请求的最后一个包的seq
+	LastSeq uint32
+	//请求的最后一个包的ack
+	LastAck uint32
 }
 
 type httpConnectionData struct {
@@ -326,10 +330,6 @@ func (http *httpPlugin) doParse(
 	} else {
 		// concatenate bytes
 		totalLength := len(st.data) + len(pkt.Payload)
-		if st.message == nil {
-			st.FirstSeq = pkt.Seq
-			st.FirstAck = pkt.Ack
-		}
 		st.LastSeq = pkt.Seq + uint32(len(pkt.Payload))
 		st.LastAck = pkt.Ack
 		logp.Info("LastSeq:%d----LastAck:%d------", st.LastSeq, st.LastAck)
@@ -345,6 +345,19 @@ func (http *httpPlugin) doParse(
 		} else {
 			st.data = append(st.data, pkt.Payload...)
 		}
+	}
+	//判断是否是响应的第一个包
+	if pkt.FirstResponsePkt {
+		logp.Info("First Response pkt")
+		logp.Info("st.FirstSeq:%d", pkt.Seq)
+		logp.Info("st.FirstAck:%d", pkt.Ack)
+		st.FirstSeq = pkt.Seq
+		st.FirstAck = pkt.Ack
+		st.PrepareForNewMessage()
+	}
+	if pkt.FirstRequestPkt {
+		logp.Info("First Request pkt")
+		st.PrepareForNewMessage()
 	}
 
 	for len(st.data) > 0 || extraMsgSize > 0 {
@@ -366,6 +379,7 @@ func (http *httpPlugin) doParse(
 			// wait for more data
 			break
 		}
+		logp.Info("all ok, ship it")
 
 		// all ok, ship it
 		http.messageComplete(conn, tcptuple, dir, st)
@@ -394,6 +408,33 @@ func (http *httpPlugin) ReceivedFin(tcptuple *common.TCPTuple, dir uint8,
 	private protos.ProtocolData) protos.ProtocolData {
 
 	debugf("Received FIN")
+	conn := getHTTPConnection(private)
+	if conn == nil {
+		return private
+	}
+	stream := conn.streams[dir]
+	if stream == nil {
+		return conn
+	}
+	logp.Info("stream is not null ")
+	// send whatever data we got so far as complete. This
+	// is needed for the HTTP/1.0 without Content-Length situation.
+	if stream.message != nil {
+		logp.Info("message is not null ")
+		http.handleHTTP(conn, stream.message, tcptuple, dir)
+
+		// and reset message. Probably not needed, just to be sure.
+		stream.PrepareForNewMessage()
+	}
+
+	return conn
+}
+
+// ReceivedFin will be called when TCP transaction is terminating.
+func (http *httpPlugin) ReceivedRST(tcptuple *common.TCPTuple, dir uint8,
+	private protos.ProtocolData) protos.ProtocolData {
+
+	debugf("Received RST,flush message")
 	conn := getHTTPConnection(private)
 	if conn == nil {
 		return private
@@ -513,8 +554,9 @@ func (http *httpPlugin) flushRequests(conn *httpConnectionData) {
 func (http *httpPlugin) correlate(conn *httpConnectionData) {
 
 	// drop responses with missing requests
+	// only drop responses when expired
 	if conn.requests.empty() {
-		http.flushResponses(conn)
+		//http.flushResponses(conn)
 		return
 	}
 
@@ -973,6 +1015,21 @@ func (ml *messageList) pop() *message {
 
 func (ml *messageList) last() *message {
 	return ml.tail
+}
+
+func (ml *messageList) size() uint32 {
+	if ml.head == nil {
+		return 0
+	}
+	i := uint32(0)
+	for e := ml.first(); e != nil; {
+		nexte := e.next
+		i++
+		e = nexte
+
+	}
+	return i
+
 }
 
 func (ml *messageList) first() *message {

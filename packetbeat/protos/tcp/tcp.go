@@ -185,6 +185,10 @@ func (stream *TCPStream) addPacket(pkt *protos.Packet, tcphdr *layers.TCP) {
 	if tcphdr.FIN {
 		conn.data = mod.ReceivedFin(&conn.tcptuple, stream.dir, conn.data)
 	}
+
+	if tcphdr.RST {
+		conn.data = mod.ReceivedFin(&conn.tcptuple, stream.dir, conn.data)
+	}
 }
 
 func (stream *TCPStream) gapInStream(nbytes int) (drop bool) {
@@ -349,6 +353,22 @@ func (tcp *TCP) judgeCurrentRequestFirstPacket(pkt *protos.Packet) (requestFirst
 	return false
 }
 
+func (tcp *TCP) judgeCurrentResponseFirstPacket(pkt *protos.Packet) (requestFirstPacket bool) {
+	if pkt == nil || len(pkt.Payload) == 0 {
+		return false
+	}
+	i := bytes.Index(pkt.Payload, []byte("\r\n"))
+	if i == -1 {
+		return false
+	}
+	if bytes.Equal(pkt.Payload[0:5], constHTTPVersion) {
+		//RESPONSE
+		return true
+	} else {
+		return false
+	}
+}
+
 func (tcp *TCP) Process(id *flows.FlowID, tcphdr *layers.TCP, pkt *protos.Packet) {
 	defer logp.Recover("Process tcp exception")
 
@@ -368,6 +388,14 @@ func (tcp *TCP) Process(id *flows.FlowID, tcphdr *layers.TCP, pkt *protos.Packet
 		// stream first in order to update the TCP stream timer
 		return
 	}
+	pkt.FirstResponsePkt = false
+	pkt.FirstRequestPkt = false
+	if tcp.judgeCurrentResponseFirstPacket(pkt) {
+		pkt.FirstResponsePkt = true
+	}
+	if tcp.judgeCurrentRequestFirstPacket(pkt) {
+		pkt.FirstRequestPkt = true
+	}
 	//判断当前的tcp包是否是request方向的第一个包，如果是第一个包，且经过判断得出当前包非缓存队列的乱序包，
 	//则需要将gap缓存队列中的所有包弹出，并且进行后续的解析
 	// fixme 需要考虑在有序的新包来临的时候进行开启新线程，线程中需要sleep几秒，
@@ -375,7 +403,7 @@ func (tcp *TCP) Process(id *flows.FlowID, tcphdr *layers.TCP, pkt *protos.Packet
 	//设置一个block状态（需要加锁），子线程中sleep完了之后，修改状态
 	//状态存储在连接上
 	if !conn.flushGapBuffer {
-		isRequestFirstPacket := tcp.judgeCurrentRequestFirstPacket(pkt)
+		isRequestFirstPacket := pkt.FirstRequestPkt
 		if isRequestFirstPacket && conn.requestPacketIndex == 0 {
 			conn.requestPacketIndex += 1
 			deepCopyPkt := new(protos.Packet)

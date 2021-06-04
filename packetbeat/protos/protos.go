@@ -42,11 +42,12 @@ const (
 type ProtocolData interface{}
 
 type Packet struct {
-	Ts      time.Time
-	Tuple   common.IPPortTuple
-	Payload []byte
-	Seq     uint32
-	Ack     uint32
+	Ts                                time.Time
+	Tuple                             common.IPPortTuple
+	Payload                           []byte
+	Seq                               uint32
+	Ack                               uint32
+	FirstResponsePkt, FirstRequestPkt bool
 }
 
 var ErrInvalidPort = errors.New("port number out of range")

@@ -529,12 +529,17 @@ func (*parser) eatBody(s *stream, m *message, size int) (ok, complete bool) {
 func (*parser) parseBodyChunkedStart(s *stream, m *message) (cont, ok, complete bool) {
 	// read hexa length
 	i := bytes.Index(s.data, constCRLF)
+	logp.Info("parseBodyChunkedStart data:%s", string(s.data))
 	if i == -1 {
 		return false, true, false
 	}
+	logp.Info("i:%d", i)
 	line := string(s.data[:i])
+	logp.Info("parseBodyChunkedStart line :%s", line)
 	chunkLength, err := strconv.ParseInt(line, 16, 32)
+	logp.Info("chunkLength:%d", chunkLength)
 	if err != nil {
+		logp.Err("Failed to understand chunked body start line,error detail:" + err.Error())
 		logp.Warn("Failed to understand chunked body start line")
 		return false, false, false
 	}
@@ -563,8 +568,10 @@ func (*parser) parseBodyChunkedStart(s *stream, m *message) (cont, ok, complete 
 }
 
 func (*parser) parseBodyChunked(s *stream, m *message) (cont, ok, complete bool) {
+	logp.Info("parseBodyChunked data:%s", string(s.data))
 	wanted := m.chunkedLength - s.bodyReceived
 	if len(s.data) >= wanted+2 /*\r\n*/ {
+		logp.Info("chunkedLength:%d--------------bodyReceived:%d", m.chunkedLength, s.bodyReceived)
 		// Received more data than expected
 		if m.saveBody {
 			m.body = append(m.body, s.data[:wanted]...)
